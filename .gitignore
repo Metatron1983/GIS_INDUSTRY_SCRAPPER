@@ -1,0 +1,9 @@
+# Файлы с переменными окружения (содержат секреты)
+.env
+.env.*
+!.env.example
+.doc
+*.docx
+todo
+mysql/
+n8n/

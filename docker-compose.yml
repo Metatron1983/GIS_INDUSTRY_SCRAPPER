@@ -1,0 +1,78 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: gisp_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mysql/data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - gisp_network
+
+  php-scraper:
+    build:
+      context: ./php-scraper
+      dockerfile: Dockerfile
+    container_name: gisp_php
+    restart: unless-stopped
+    volumes:
+      - ./php-scraper/src:/var/www/html/src
+      - ./php-scraper/storage:/var/www/storage
+    environment:
+      - DB_HOST=mysql
+      - DB_NAME=${MYSQL_DATABASE}
+      - DB_USER=${MYSQL_USER}
+      - DB_PASS=${MYSQL_PASSWORD}
+      - YANDEX_API_KEY=${YANDEX_API_KEY}
+      - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
+      - YANDEX_MODEL=${YANDEX_MODEL}
+    depends_on:
+      - mysql
+      - selenium
+    networks:
+      - gisp_network
+    command: php -S 0.0.0.0:8000 -t /var/www/html
+
+  selenium:
+    image: selenium/standalone-chrome:latest
+    container_name: gisp_selenium
+    restart: unless-stopped
+    ports:
+      - "4444:4444"
+      - "7900:7900"
+    shm_size: 2gb
+    networks:
+      - gisp_network
+    environment:
+      - SE_NODE_MAX_SESSIONS=5
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: gisp_n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      - WEBHOOK_URL=http://localhost:5678/
+      - DB_TYPE=sqlite
+      - DB_SQLITE_DATABASE=/home/node/.n8n/database.sqlite
+    volumes:
+      - ./n8n/data:/home/node/.n8n
+    depends_on:
+      - php-scraper
+    networks:
+      - gisp_network
+
+networks:
+  gisp_network:
+    driver: bridge

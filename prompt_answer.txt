@@ -1,0 +1,999 @@
+Ниже — итоговая пошаговая инструкция, которая объединяет всё, что мы обсуждали. В ней учтены:
+- динамические разделы карточки меры с отдельными URL-адресами;
+- Selenium для работы с JavaScript;
+- YandexGPT для смыслового сравнения текстов;
+- n8n как оркестратор;
+- полная контейнеризация через Docker.
+
+---
+
+# Итоговая пошаговая инструкция по разработке приложения
+
+## 1. Подготовка окружения
+
+### 1.1. Установка Docker и Docker Compose
+1. Скачайте и установите **Docker Desktop** с [официального сайта](https://www.docker.com/products/docker-desktop/).
+2. После установки перезагрузите компьютер и запустите Docker Desktop.
+3. Откройте командную строку (cmd) или PowerShell и проверьте установку:
+   ```bash
+   docker --version
+   docker-compose --version
+   ```
+
+### 1.2. Создание структуры проекта
+Создайте на диске `C:` папку `gisp-scraper` со следующей структурой:
+
+```
+C:\gisp-scraper\
+├── docker-compose.yml
+├── .env
+├── n8n\
+│   └── data\                       # данные n8n (создадутся автоматически)
+├── mysql\
+│   └── data\                       # данные MySQL
+├── php-scraper\
+│   ├── Dockerfile
+│   ├── src\
+│   │   ├── config.php
+│   │   ├── scraper.php
+│   │   ├── parser.php
+│   │   ├── downloader.php
+│   │   ├── selenium_helper.php
+│   │   ├── llm_comparator.php
+│   │   ├── comparator.php
+│   │   ├── reporter.php
+│   │   └── composer.json
+│   └── storage\
+│       ├── documents\
+│       └── reports\
+└── selenium\                       # не требуется, используется готовый образ
+```
+
+---
+
+## 2. Настройка Docker Compose и переменных окружения
+
+### 2.1. Файл `docker-compose.yml`
+Создайте в корне проекта файл `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  # === MySQL ===
+  mysql:
+    image: mysql:8.0
+    container_name: gisp_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mysql/data:/var/lib/mysql
+    networks:
+      - gisp_network
+
+  # === PHP-скраппер ===
+  php-scraper:
+    build:
+      context: ./php-scraper
+      dockerfile: Dockerfile
+    container_name: gisp_php
+    restart: unless-stopped
+    volumes:
+      - ./php-scraper/src:/var/www/html
+      - ./php-scraper/storage:/var/www/storage
+    environment:
+      - DB_HOST=mysql
+      - DB_NAME=${MYSQL_DATABASE}
+      - DB_USER=${MYSQL_USER}
+      - DB_PASS=${MYSQL_PASSWORD}
+      - YANDEX_API_KEY=${YANDEX_API_KEY}
+      - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
+      - YANDEX_MODEL=${YANDEX_MODEL}
+    depends_on:
+      - mysql
+      - selenium
+    networks:
+      - gisp_network
+    command: php -S 0.0.0.0:8000 -t /var/www/html
+
+  # === Selenium Standalone Chrome ===
+  selenium:
+    image: selenium/standalone-chrome:latest
+    container_name: gisp_selenium
+    restart: unless-stopped
+    ports:
+      - "4444:4444"   # WebDriver
+      - "7900:7900"   # VNC (опционально)
+    shm_size: 2gb
+    networks:
+      - gisp_network
+    environment:
+      - SE_NODE_MAX_SESSIONS=5
+      - SE_NODE_OVERRIDE_MAX_SESSIONS=true
+
+  # === n8n ===
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: gisp_n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      - WEBHOOK_URL=http://localhost:5678/
+      - DB_TYPE=sqlite
+      - DB_SQLITE_DATABASE=/home/node/.n8n/database.sqlite
+    volumes:
+      - ./n8n/data:/home/node/.n8n
+    depends_on:
+      - php-scraper
+    networks:
+      - gisp_network
+
+networks:
+  gisp_network:
+    driver: bridge
+```
+
+### 2.2. Файл `.env`
+Создайте в корне проекта файл `.env`:
+
+```env
+# MySQL
+MYSQL_ROOT_PASSWORD=rootpass123
+MYSQL_DATABASE=gisp_db
+MYSQL_USER=gisp_user
+MYSQL_PASSWORD=gisp_pass123
+
+# n8n
+N8N_PASSWORD=admin123
+
+# YandexGPT (получите в Yandex Cloud)
+YANDEX_API_KEY=ваш_api_ключ
+YANDEX_FOLDER_ID=ваш_идентификатор_каталога
+YANDEX_MODEL=yandexgpt-lite   # или yandexgpt, yandexgpt-pro
+
+# Параметры скраппинга
+BASE_URL=https://gisp.gov.ru
+NAVIGATOR_URL=https://gisp.gov.ru/navigator-measures/ru-RU
+ITEMS_PER_PAGE=50
+MAX_RETRIES=3
+REQUEST_DELAY=2
+```
+
+---
+
+## 3. Сборка PHP-контейнера
+
+### 3.1. Файл `php-scraper/Dockerfile`
+
+```dockerfile
+FROM php:8.2-cli
+
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    libzip-dev \
+    libxml2-dev \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    wget \
+    poppler-utils \
+    && docker-php-ext-install \
+    pdo_mysql \
+    zip \
+    xml \
+    curl \
+    bcmath
+
+# Установка Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Копируем composer.json и устанавливаем зависимости
+COPY src/composer.json /var/www/html/composer.json
+RUN cd /var/www/html && composer install --no-interaction
+
+# Копируем остальной код
+COPY src/ /var/www/html/
+
+# Создаём папки для хранения файлов
+RUN mkdir -p /var/www/storage/documents /var/www/storage/reports
+
+EXPOSE 8000
+CMD ["php", "-S", "0.0.0.0:8000", "-t", "/var/www/html"]
+```
+
+### 3.2. Файл `php-scraper/src/composer.json`
+
+```json
+{
+    "require": {
+        "guzzlehttp/guzzle": "^7.0",
+        "symfony/dom-crawler": "^6.0",
+        "symfony/css-selector": "^6.0",
+        "php-webdriver/webdriver": "^1.0",
+        "tigusigalpa/yandexgpt-php": "^1.0"
+    }
+}
+```
+
+---
+
+## 4. PHP-скрипты
+
+Все PHP-файлы помещаются в `php-scraper/src/`.
+
+### 4.1. `config.php` — конфигурация
+
+```php
+<?php
+return [
+    'base_url' => getenv('BASE_URL') ?: 'https://gisp.gov.ru',
+    'navigator_url' => getenv('NAVIGATOR_URL') ?: 'https://gisp.gov.ru/navigator-measures/ru-RU',
+    'items_per_page' => getenv('ITEMS_PER_PAGE') ?: 50,
+    'max_retries' => getenv('MAX_RETRIES') ?: 3,
+    'request_delay' => getenv('REQUEST_DELAY') ?: 2,
+    'storage_path' => '/var/www/storage',
+    'documents_path' => '/var/www/storage/documents',
+    'reports_path' => '/var/www/storage/reports',
+    'db' => [
+        'host' => getenv('DB_HOST') ?: 'mysql',
+        'name' => getenv('DB_NAME') ?: 'gisp_db',
+        'user' => getenv('DB_USER') ?: 'gisp_user',
+        'pass' => getenv('DB_PASS') ?: 'gisp_pass123',
+    ],
+    'yandex' => [
+        'api_key' => getenv('YANDEX_API_KEY'),
+        'folder_id' => getenv('YANDEX_FOLDER_ID'),
+        'model' => getenv('YANDEX_MODEL') ?: 'yandexgpt-lite',
+    ],
+];
+```
+
+### 4.2. `selenium_helper.php` — работа с Selenium
+
+```php
+<?php
+use Facebook\WebDriver\Remote\RemoteWebDriver;
+use Facebook\WebDriver\Remote\DesiredCapabilities;
+use Facebook\WebDriver\WebDriverBy;
+use Facebook\WebDriver\WebDriverExpectedCondition;
+
+function getSeleniumDriver() {
+    return RemoteWebDriver::create('http://selenium:4444', DesiredCapabilities::chrome());
+}
+
+function getPageHtmlWithSelenium($url, $waitSelector = null, $timeout = 10) {
+    try {
+        $driver = getSeleniumDriver();
+        $driver->get($url);
+        if ($waitSelector) {
+            $driver->wait($timeout)->until(
+                WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector($waitSelector))
+            );
+        }
+        usleep(500000);
+        $html = $driver->getPageSource();
+        $driver->quit();
+        return $html;
+    } catch (Exception $e) {
+        error_log("Selenium error: " . $e->getMessage());
+        return null;
+    }
+}
+
+function fetchHtml($url, $useSelenium = false, $waitSelector = null) {
+    if ($useSelenium) {
+        return getPageHtmlWithSelenium($url, $waitSelector);
+    }
+    $client = new \GuzzleHttp\Client(['timeout' => 30, 'headers' => ['User-Agent' => 'Mozilla/5.0']]);
+    try {
+        return (string) $client->get($url)->getBody();
+    } catch (Exception $e) {
+        error_log("Guzzle error: " . $e->getMessage());
+        return null;
+    }
+}
+```
+
+### 4.3. `parser.php` — парсинг страниц
+
+```php
+<?php
+use Facebook\WebDriver\WebDriverBy;
+use Facebook\WebDriver\WebDriverExpectedCondition;
+
+/**
+ * Парсинг списка мер поддержки
+ */
+function parseMeasureList($html, $baseUrl) {
+    $crawler = new \Symfony\Component\DomCrawler\Crawler($html);
+    $items = [];
+    $crawler->filter('a[href*="/nmp/measure/"]')->each(function ($node) use (&$items, $baseUrl) {
+        $href = $node->attr('href');
+        if ($href && strpos($href, '/nmp/measure/') !== false) {
+            preg_match('/\/nmp\/measure\/(\d+)/', $href, $matches);
+            $id = $matches[1] ?? null;
+            if ($id) {
+                $items[] = [
+                    'id' => $id,
+                    'title' => trim($node->text()) ?: "Мера {$id}",
+                    'url' => $href,
+                ];
+            }
+        }
+    });
+    // Удаление дубликатов
+    $unique = [];
+    $seen = [];
+    foreach ($items as $item) {
+        if (!in_array($item['id'], $seen)) {
+            $seen[] = $item['id'];
+            $unique[] = $item;
+        }
+    }
+    return ['count' => count($unique), 'items' => $unique];
+}
+
+/**
+ * Парсинг детальной страницы меры с учётом динамических разделов
+ * Разделы имеют отдельные URL:
+ * - Требования: /nmp/measure/{id}/requirement
+ * - Порядок получения: /nmp/measure/{id}/stage
+ * - Необходимые документы: /nmp/measure/{id}/document
+ */
+function parseMeasureDetailWithSelenium($driver, $measureId, $baseUrl) {
+    $baseMeasureUrl = "{$baseUrl}/nmp/measure/{$measureId}";
+    
+    // Загружаем основную страницу — получаем "Назначение"
+    $driver->get($baseMeasureUrl);
+    $driver->wait(10)->until(
+        WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.measure-content, .nmp-measure'))
+    );
+    
+    $data = [
+        'purpose' => '',
+        'requirements' => '',
+        'required_docs' => '',
+        'procedure' => '',
+        'npa_links' => [],
+        'npa_section_exists' => false,
+    ];
+    
+    // --- 1. Назначение (есть на основной странице) ---
+    try {
+        $purposeEl = $driver->findElement(WebDriverBy::cssSelector('.purpose-block, .measure-purpose, h2:contains("Назначение") + div'));
+        $data['purpose'] = $purposeEl->getText();
+    } catch (Exception $e) {
+        // не найдено — оставляем пустым
+    }
+    
+    // --- 2. Требования (отдельный URL) ---
+    $requirementUrl = "{$baseUrl}/nmp/measure/{$measureId}/requirement";
+    try {
+        $driver->get($requirementUrl);
+        $driver->wait(5)->until(
+            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.requirement-content, .tab-content'))
+        );
+        $data['requirements'] = $driver->findElement(WebDriverBy::cssSelector('.requirement-content, .tab-content'))->getText();
+    } catch (Exception $e) {
+        // раздел может отсутствовать
+    }
+    
+    // --- 3. Порядок получения (отдельный URL) ---
+    $stageUrl = "{$baseUrl}/nmp/measure/{$measureId}/stage";
+    try {
+        $driver->get($stageUrl);
+        $driver->wait(5)->until(
+            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.stage-content, .tab-content'))
+        );
+        $data['procedure'] = $driver->findElement(WebDriverBy::cssSelector('.stage-content, .tab-content'))->getText();
+    } catch (Exception $e) {
+        // раздел может отсутствовать
+    }
+    
+    // --- 4. Необходимые документы (отдельный URL) ---
+    $documentUrl = "{$baseUrl}/nmp/measure/{$measureId}/document";
+    try {
+        $driver->get($documentUrl);
+        $driver->wait(5)->until(
+            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.document-content, .tab-content'))
+        );
+        $data['required_docs'] = $driver->findElement(WebDriverBy::cssSelector('.document-content, .tab-content'))->getText();
+    } catch (Exception $e) {
+        // раздел может отсутствовать
+    }
+    
+    // --- 5. Блок "НПА и другие документы" (на основной странице) ---
+    $driver->get($baseMeasureUrl);
+    $driver->wait(10)->until(
+        WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.measure-content, .nmp-measure'))
+    );
+    try {
+        $npaSection = $driver->findElement(WebDriverBy::cssSelector('.npa-section, .documents-section, h2:contains("НПА")'));
+        $data['npa_section_exists'] = true;
+        $links = $npaSection->findElements(WebDriverBy::cssSelector('a[href]'));
+        foreach ($links as $link) {
+            $href = $link->getAttribute('href');
+            $text = $link->getText();
+            if ($href) {
+                $data['npa_links'][] = [
+                    'url' => $href,
+                    'text' => $text ?: basename($href),
+                ];
+            }
+        }
+    } catch (Exception $e) {
+        $data['npa_section_exists'] = false;
+        $data['npa_links'] = [];
+    }
+    
+    return $data;
+}
+```
+
+### 4.4. `downloader.php` — загрузка документов и проверка ссылок
+
+```php
+<?php
+function checkDocumentLink($client, $url) {
+    try {
+        $response = $client->head($url, ['allow_redirects' => true, 'timeout' => 10]);
+        if ($response->getStatusCode() !== 200) {
+            return ['valid' => false, 'error' => "HTTP {$response->getStatusCode()}"];
+        }
+        $contentType = $response->getHeaderLine('Content-Type');
+        $allowed = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/rtf'];
+        $isDoc = false;
+        foreach ($allowed as $t) {
+            if (strpos($contentType, $t) !== false) { $isDoc = true; break; }
+        }
+        if (!$isDoc) {
+            return ['valid' => false, 'error' => "Не документ (Content-Type: {$contentType})"];
+        }
+        return ['valid' => true, 'contentType' => $contentType];
+    } catch (Exception $e) {
+        return ['valid' => false, 'error' => $e->getMessage()];
+    }
+}
+
+function downloadDocuments($client, $config, $measureId, $documents) {
+    $docPath = $config['documents_path'] . '/' . $measureId;
+    if (!is_dir($docPath)) mkdir($docPath, 0777, true);
+    
+    $db = new PDO(
+        "mysql:host={$config['db']['host']};dbname={$config['db']['name']};charset=utf8mb4",
+        $config['db']['user'],
+        $config['db']['pass']
+    );
+    
+    $validCount = 0;
+    foreach ($documents as $doc) {
+        $url = $doc['url'];
+        if (strpos($url, 'http') !== 0) {
+            $url = $config['base_url'] . $url;
+        }
+        $filename = preg_replace('/[^\w\s.-]/u', '_', $doc['text']) . '.pdf';
+        $filepath = $docPath . '/' . $filename;
+        
+        $check = checkDocumentLink($client, $url);
+        if (!$check['valid']) {
+            $stmt = $db->prepare("INSERT INTO documents (measure_id, document_name, document_type, download_error) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$measureId, $doc['text'], 'pdf', "Ссылка: {$url} | Ошибка: {$check['error']}"]);
+            continue;
+        }
+        
+        if (file_exists($filepath)) continue;
+        
+        try {
+            $client->get($url, ['sink' => $filepath, 'timeout' => 60]);
+            $hash = hash_file('sha256', $filepath);
+            $stmt = $db->prepare("INSERT INTO documents (measure_id, document_name, document_type, file_path, file_hash) VALUES (?, ?, ?, ?, ?)");
+            $stmt->execute([$measureId, $doc['text'], 'pdf', $filepath, $hash]);
+            $validCount++;
+        } catch (Exception $e) {
+            $stmt = $db->prepare("INSERT INTO documents (measure_id, document_name, document_type, download_error) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$measureId, $doc['text'], 'pdf', "Ссылка: {$url} | Ошибка скачивания: " . $e->getMessage()]);
+        }
+    }
+    
+    // Если раздел НПА есть, но ни один документ не скачан — фиксируем ошибку
+    if (!empty($documents) && $validCount === 0) {
+        $stmt = $db->prepare("INSERT INTO measure_errors (measure_id, error_type, error_text) VALUES (?, 'no_valid_documents', ?)");
+        $stmt->execute([$measureId, 'Ни одна ссылка из раздела НПА не ведёт к документу']);
+    }
+}
+```
+
+### 4.5. `scraper.php` — основной скраппер
+
+```php
+<?php
+require_once 'vendor/autoload.php';
+require_once 'config.php';
+require_once 'parser.php';
+require_once 'downloader.php';
+require_once 'selenium_helper.php';
+
+$config = require 'config.php';
+$client = new GuzzleHttp\Client(['timeout' => 30, 'headers' => ['User-Agent' => 'Mozilla/5.0']]);
+$db = new PDO("mysql:host={$config['db']['host']};dbname={$config['db']['name']};charset=utf8mb4", $config['db']['user'], $config['db']['pass']);
+$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+function logMsg($msg) { echo '[' . date('Y-m-d H:i:s') . '] ' . $msg . PHP_EOL; }
+
+function getMeasureList($client, $config, $page) {
+    $url = $config['navigator_url'] . "?page={$page}&per-page={$config['items_per_page']}";
+    logMsg("Загрузка страницы {$page}");
+    $html = fetchHtml($url, false);
+    if (!$html || !strpos($html, 'measure-item')) {
+        logMsg("Пробуем Selenium...");
+        $html = fetchHtml($url, true, '.measure-item');
+    }
+    return $html ? parseMeasureList($html, $config['base_url']) : ['count' => 0, 'items' => []];
+}
+
+function saveMeasure($db, $data) {
+    $sql = "INSERT INTO measures (
+        measure_id, title, purpose, requirements, required_docs, procedure, 
+        npa_section_exists, url
+    ) VALUES (
+        :id, :title, :purpose, :requirements, :required_docs, :procedure,
+        :npa_section_exists, :url
+    ) ON DUPLICATE KEY UPDATE
+        title = VALUES(title),
+        purpose = VALUES(purpose),
+        requirements = VALUES(requirements),
+        required_docs = VALUES(required_docs),
+        procedure = VALUES(procedure),
+        npa_section_exists = VALUES(npa_section_exists)";
+    $stmt = $db->prepare($sql);
+    return $stmt->execute($data);
+}
+
+// Основной цикл
+$driver = getSeleniumDriver();
+$page = 1;
+$total = 0;
+
+while (true) {
+    $list = getMeasureList($client, $config, $page);
+    if (empty($list['items'])) break;
+    
+    foreach ($list['items'] as $item) {
+        logMsg("Обработка меры {$item['id']}: {$item['title']}");
+        
+        // Парсим детали с учётом всех разделов
+        $detail = parseMeasureDetailWithSelenium($driver, $item['id'], $config['base_url']);
+        
+        $data = [
+            'id' => $item['id'],
+            'title' => $item['title'],
+            'url' => $item['url'],
+            'purpose' => $detail['purpose'] ?? '',
+            'requirements' => $detail['requirements'] ?? '',
+            'required_docs' => $detail['required_docs'] ?? '',
+            'procedure' => $detail['procedure'] ?? '',
+            'npa_section_exists' => $detail['npa_section_exists'] ? 1 : 0,
+        ];
+        
+        saveMeasure($db, $data);
+        
+        // Если НПА отсутствует — записываем ошибку
+        if (!$detail['npa_section_exists']) {
+            $stmt = $db->prepare("INSERT INTO measure_errors (measure_id, error_type, error_text) VALUES (?, 'no_npa_section', ?)");
+            $stmt->execute([$item['id'], 'Раздел "НПА и другие документы" отсутствует на странице']);
+        }
+        
+        // Скачиваем документы, если они есть
+        if (!empty($detail['npa_links'])) {
+            downloadDocuments($client, $config, $item['id'], $detail['npa_links']);
+        }
+        
+        $total++;
+        sleep($config['request_delay']);
+    }
+    $page++;
+}
+
+$driver->quit();
+logMsg("Собрано мер: {$total}");
+```
+
+### 4.6. `llm_comparator.php` — интеграция с YandexGPT
+
+```php
+<?php
+use Tigusigalpa\YandexGptPhp\YandexGpt;
+use Tigusigalpa\YandexGptPhp\Completion\Completion;
+
+class LLMComparator {
+    private $client;
+    private $modelUri;
+    
+    public function __construct() {
+        $config = require 'config.php';
+        $this->client = new YandexGpt(
+            apiKey: $config['yandex']['api_key'],
+            folderId: $config['yandex']['folder_id']
+        );
+        $this->modelUri = "gpt://" . $config['yandex']['folder_id'] . "/" . $config['yandex']['model'] . "/latest";
+    }
+    
+    public function compare($cardText, $docText, $title = '') {
+        if (empty(trim($cardText))) return ['error' => 'Пустая карточка'];
+        if (empty(trim($docText))) return ['error' => 'Пустой документ'];
+        
+        $cardText = mb_substr($cardText, 0, 2500);
+        $docText = mb_substr($docText, 0, 4000);
+        
+        $prompt = "Сравни тексты и найди расхождения:\n\n";
+        $prompt .= "### Карточка меры поддержки (назначение, требования, документы, порядок):\n{$cardText}\n\n";
+        $prompt .= "### Текст нормативного документа:\n{$docText}\n\n";
+        $prompt .= "Ответь строго в формате JSON:\n";
+        $prompt .= "{\"discrepancies\":[{\"type\":\"missing_in_document\"|\"missing_in_card\"|\"contradiction\",\"fragment\":\"...\",\"description\":\"...\"}],\"summary\":\"...\"}";
+        
+        $completion = (new Completion())
+            ->setModelUri($this->modelUri)
+            ->addText([
+                ['role' => Completion::SYSTEM, 'text' => 'Ты — эксперт по анализу нормативных документов. Отвечай только JSON.'],
+                ['role' => Completion::USER, 'text' => $prompt]
+            ])
+            ->setTemperature(0.1)
+            ->setMaxTokens(4000);
+        
+        $result = json_decode($this->client->request($completion), true);
+        $text = $result['result']['alternatives'][0]['message']['text'] ?? '';
+        
+        preg_match('/\{[\s\S]*\}/', $text, $matches);
+        if ($matches) {
+            return json_decode($matches[0], true);
+        }
+        
+        return ['raw' => $text, 'discrepancies' => [], 'summary' => 'Ошибка парсинга ответа'];
+    }
+}
+```
+
+### 4.7. `comparator.php` — запуск сравнения
+
+```php
+<?php
+require_once 'vendor/autoload.php';
+require_once 'config.php';
+require_once 'llm_comparator.php';
+
+$config = require 'config.php';
+$db = new PDO("mysql:host={$config['db']['host']};dbname={$config['db']['name']};charset=utf8mb4", $config['db']['user'], $config['db']['pass']);
+$comparator = new LLMComparator();
+
+// Получаем все меры
+$measures = $db->query("SELECT measure_id, title, purpose, requirements, required_docs, procedure FROM measures")->fetchAll(PDO::FETCH_ASSOC);
+
+foreach ($measures as $m) {
+    // Формируем текст карточки из всех разделов
+    $cardText = implode("\n\n", array_filter([
+        "Назначение: " . ($m['purpose'] ?? ''),
+        "Требования: " . ($m['requirements'] ?? ''),
+        "Необходимые документы: " . ($m['required_docs'] ?? ''),
+        "Порядок получения: " . ($m['procedure'] ?? ''),
+    ]));
+    
+    // Получаем текст из скачанных документов
+    $stmt = $db->prepare("SELECT file_path FROM documents WHERE measure_id = ? AND download_error IS NULL");
+    $stmt->execute([$m['measure_id']]);
+    $docs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    $docText = '';
+    foreach ($docs as $d) {
+        $docText .= shell_exec("pdftotext '{$d['file_path']}' - 2>/dev/null");
+    }
+    
+    if (empty($cardText) || empty($docText)) {
+        echo "Мера {$m['measure_id']}: недостаточно данных\n";
+        continue;
+    }
+    
+    echo "Мера {$m['measure_id']}: отправка в YandexGPT...\n";
+    $result = $comparator->compare($cardText, $docText, $m['title']);
+    
+    $stmt = $db->prepare("INSERT INTO comparison_results (measure_id, has_discrepancies, discrepancies_json, summary) VALUES (?, ?, ?, ?)");
+    $stmt->execute([
+        $m['measure_id'],
+        !empty($result['discrepancies']) ? 1 : 0,
+        json_encode($result['discrepancies'] ?? [], JSON_UNESCAPED_UNICODE),
+        $result['summary'] ?? ''
+    ]);
+    
+    sleep(2); // соблюдение квот YandexGPT
+}
+```
+
+### 4.8. `reporter.php` — генерация отчётов
+
+```php
+<?php
+require_once 'config.php';
+
+$config = require 'config.php';
+$db = new PDO("mysql:host={$config['db']['host']};dbname={$config['db']['name']};charset=utf8mb4", $config['db']['user'], $config['db']['pass']);
+
+// Сбор всех ошибок
+$errors = [];
+
+// 1. Ошибки из таблицы measure_errors
+$stmt = $db->query("SELECT * FROM measure_errors");
+$errors['measure_errors'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// 2. Расхождения из comparison_results
+$stmt = $db->query("SELECT measure_id, discrepancies_json, summary FROM comparison_results WHERE has_discrepancies = 1");
+$errors['discrepancies'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// 3. Ссылки с ошибками из таблицы documents
+$stmt = $db->query("SELECT measure_id, document_name, download_error FROM documents WHERE download_error IS NOT NULL");
+$errors['document_errors'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Формируем отчёт
+$report = [
+    'generated_at' => date('Y-m-d H:i:s'),
+    'errors' => $errors,
+    'recommendations' => []
+];
+
+// Генерация рекомендаций
+foreach ($errors['measure_errors'] as $e) {
+    if ($e['error_type'] === 'no_npa_section') {
+        $report['recommendations'][] = "Для меры {$e['measure_id']} отсутствует раздел НПА. Проверьте страницу.";
+    }
+    if ($e['error_type'] === 'no_valid_documents') {
+        $report['recommendations'][] = "Для меры {$e['measure_id']} все ссылки из раздела НПА не ведут к документам. Проверьте ссылки.";
+    }
+}
+
+foreach ($errors['discrepancies'] as $d) {
+    $disc = json_decode($d['discrepancies_json'], true);
+    foreach ($disc as $item) {
+        $report['recommendations'][] = "Мера {$d['measure_id']}: {$item['description']} (фрагмент: {$item['fragment']})";
+    }
+}
+
+// Сохраняем отчёт
+$filename = "report_" . date('Ymd_His') . ".json";
+$filepath = $config['reports_path'] . '/' . $filename;
+file_put_contents($filepath, json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+echo "Отчёт сохранён: {$filepath}\n";
+```
+
+---
+
+## 5. Создание базы данных
+
+Подключитесь к MySQL внутри контейнера и выполните SQL:
+
+```bash
+docker exec -it gisp_mysql mysql -u root -p
+```
+
+Введите пароль `rootpass123` и выполните:
+
+```sql
+USE gisp_db;
+
+-- Таблица мер поддержки
+CREATE TABLE measures (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    measure_id VARCHAR(50) UNIQUE NOT NULL,
+    title VARCHAR(500) NOT NULL,
+    purpose TEXT,
+    requirements TEXT,
+    required_docs TEXT,
+    procedure TEXT,
+    npa_section_exists BOOLEAN DEFAULT FALSE,
+    url VARCHAR(500),
+    scraped_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Таблица документов
+CREATE TABLE documents (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    measure_id VARCHAR(50) NOT NULL,
+    document_name VARCHAR(500),
+    document_type VARCHAR(100),
+    file_path VARCHAR(500),
+    file_hash VARCHAR(64),
+    download_error TEXT,
+    downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (measure_id) REFERENCES measures(measure_id) ON DELETE CASCADE
+);
+
+-- Таблица содержимого документов
+CREATE TABLE document_contents (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    document_id INT NOT NULL,
+    content_text LONGTEXT,
+    extracted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+-- Таблица результатов сравнения
+CREATE TABLE comparison_results (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    measure_id VARCHAR(50) NOT NULL,
+    comparison_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    has_discrepancies BOOLEAN DEFAULT FALSE,
+    discrepancies_json JSON,
+    summary TEXT,
+    FOREIGN KEY (measure_id) REFERENCES measures(measure_id) ON DELETE CASCADE
+);
+
+-- Таблица ошибок мер
+CREATE TABLE measure_errors (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    measure_id VARCHAR(50) NOT NULL,
+    error_type VARCHAR(100),
+    error_text TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (measure_id) REFERENCES measures(measure_id) ON DELETE CASCADE
+);
+
+-- Таблица отчётов
+CREATE TABLE reports (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    report_type ENUM('errors', 'recommendations') NOT NULL,
+    generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    content JSON,
+    file_path VARCHAR(500)
+);
+```
+
+Выйдите из MySQL: `EXIT;`
+
+---
+
+## 6. Получение API-ключа YandexGPT
+
+1. Зайдите в [Yandex Cloud](https://cloud.yandex.ru/).
+2. Создайте **платёжный аккаунт** (пополните на небольшую сумму для теста).
+3. Перейдите в раздел **«Сервисные аккаунты»**.
+4. Создайте сервисный аккаунт с ролью **`ai.languageModels.user`**.
+5. Сгенерируйте **API-ключ** и скопируйте его.
+6. Скопируйте **идентификатор каталога** (Folder ID).
+7. Внесите эти данные в файл `.env`:
+   ```
+   YANDEX_API_KEY=ваш_api_ключ
+   YANDEX_FOLDER_ID=ваш_идентификатор_каталога
+   ```
+
+---
+
+## 7. Запуск и тестирование
+
+### 7.1. Запуск всех контейнеров
+```bash
+cd C:\gisp-scraper
+docker-compose up -d
+```
+
+Проверьте статус:
+```bash
+docker-compose ps
+```
+
+### 7.2. Ручной запуск скраппера
+```bash
+docker exec -it gisp_php php /var/www/html/scraper.php
+```
+
+### 7.3. Запуск сравнения
+```bash
+docker exec -it gisp_php php /var/www/html/comparator.php
+```
+
+### 7.4. Генерация отчётов
+```bash
+docker exec -it gisp_php php /var/www/html/reporter.php
+```
+
+Отчёты появятся в `php-scraper/storage/reports/`.
+
+---
+
+## 8. Настройка n8n
+
+1. Откройте в браузере `http://localhost:5678`.
+2. Войдите: логин `admin`, пароль из `.env` (`admin123`).
+3. Создайте новый workflow.
+4. Добавьте узлы в следующей последовательности:
+   - **Schedule Trigger** (например, запуск раз в день) или **Webhook** (для ручного запуска).
+   - **HTTP Request** → метод `GET`, URL `http://php-scraper:8000/scraper.php`.
+   - **HTTP Request** → метод `GET`, URL `http://php-scraper:8000/comparator.php`.
+   - **HTTP Request** → метод `GET`, URL `http://php-scraper:8000/reporter.php`.
+   - (Опционально) **Email** для отправки отчётов.
+5. Соедините узлы последовательно.
+6. Активируйте workflow (переключатель в правом верхнем углу).
+
+---
+
+## 9. Важные замечания
+
+- **Селекторы** в `parser.php` необходимо уточнить под реальную структуру сайта. Используйте инструменты разработчика в браузере (F12).
+- **Квоты YandexGPT** — для 2500 мер может потребоваться значительное количество токенов. Рекомендуется использовать модель `yandexgpt-lite` для первичного анализа.
+- **Обновление данных** — можно реализовать инкрементальный сбор, проверяя наличие `measure_id` в БД перед повторным парсингом.
+- **Обработка ошибок** в коде упрощена для наглядности; в боевом проекте добавьте логирование и повторные попытки.
+
+---
+
+# Оценка целесообразности разбиения на микросервисы
+
+## Имеет ли смысл разбивать данный функционал на микросервисы?
+
+**Краткий ответ: нет, в данном случае монолитная архитектура более предпочтительна.**
+
+### Аргументы против микросервисов
+
+1. **Связанность данных** — все компоненты работают с одной и той же БД (measures, documents, comparison_results). Разделение на микросервисы создаст сложности с транзакционной целостностью и синхронизацией данных.
+
+2. **Линейный пайплайн** — процессы выполняются последовательно: сбор → сравнение → отчёты. Нет необходимости в параллельной обработке или независимом масштабировании отдельных частей.
+
+3. **Операционные издержки** — микросервисная архитектура потребует:
+   - организации межсервисного взаимодействия (REST/gRPC/очереди);
+   - управления версиями API;
+   - дополнительного мониторинга и логирования;
+   - более сложного развертывания.
+
+4. **Объём данных** — 2500 мер — это небольшой объём, который легко обрабатывается одним PHP-скриптом. Дополнительная инфраструктура только усложнит поддержку.
+
+5. **Единая точка входа** — n8n уже выполняет роль оркестратора, запуская скрипты в нужной последовательности. Это достаточный уровень модульности.
+
+### Когда микросервисы могли бы быть оправданы
+
+Если бы возникли следующие требования, можно было бы рассмотреть разделение:
+
+| Гипотетическое требование | Возможное разделение |
+|---------------------------|----------------------|
+| Параллельный сбор с разных источников | Отдельный сервис-скраппер для каждого источника |
+| Высокая нагрузка (тысячи запросов в секунду) | Выделение API-шлюза и горизонтальное масштабирование |
+| Независимое обновление LLM-логики | Отдельный сервис сравнения с версионированием |
+| Интеграция с внешними системами через webhook | Отдельный сервис-адаптер |
+
+В текущей постановке задачи эти требования отсутствуют.
+
+### Рекомендуемая архитектура
+
+**Модульный монолит** с чёткими границами между компонентами внутри одного PHP-контейнера:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Монолит (PHP)                          │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│  │ Скраппер │  │ Парсер   │  │Загрузчик │  │Компаратор│  │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
+│  ┌──────────┐  ┌──────────┐                               │
+│  │ Генератор│  │  n8n     │  ←── оркестрация              │
+│  │ отчётов  │  │(отдельный│                               │
+│  └──────────┘  │ контейнер│                               │
+│                └──────────┘                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Преимущества такого подхода**:
+- Простота развертывания (один `docker-compose up`);
+- Лёгкость отладки и тестирования;
+- Минимальные накладные расходы на межсервисное взаимодействие;
+- Возможность при необходимости вынести отдельные модули в микросервисы без полной перестройки архитектуры.
+
+---
+
+Если у вас возникнут вопросы по конкретным селекторам, настройке n8n или интеграции с YandexGPT — обращайтесь, помогу уточнить.

@@ -1,0 +1,23 @@
+C:\gisp-scraper\
+├── docker-compose.yml
+├── .env
+├── n8n\
+│   └── data\                       # данные n8n (создадутся автоматически)
+├── mysql\
+│   └── data\                       # данные MySQL
+├── php-scraper\
+│   ├── Dockerfile
+│   ├── src\
+│   │   ├── config.php
+│   │   ├── scraper.php
+│   │   ├── parser.php
+│   │   ├── downloader.php
+│   │   ├── selenium_helper.php
+│   │   ├── llm_comparator.php
+│   │   ├── comparator.php
+│   │   ├── reporter.php
+│   │   └── composer.json
+│   └── storage\
+│       ├── documents\
+│       └── reports\
+└── selenium\                       # не требуется, используется готовый образ

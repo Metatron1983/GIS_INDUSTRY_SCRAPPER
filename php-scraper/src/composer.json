@@ -1,0 +1,10 @@
+{
+    "require": {
+        "guzzlehttp/guzzle": "^7.0",
+        "symfony/dom-crawler": "^6.0",
+        "symfony/css-selector": "^6.0",
+        "php-webdriver/webdriver": "^1.0",
+        "tigusigalpa/yandexgpt-php": "^1.0",
+        "phpoffice/phpspreadsheet": "^1.29"
+    }
+}
