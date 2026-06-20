@@ -1,10 +1,11 @@
 <?php
 return [
     'base_url' => getenv('BASE_URL') ?: 'https://gisp.gov.ru',
-    'navigator_url' => getenv('NAVIGATOR_URL') ?: 'https://gisp.gov.ru/navigator-measures/ru-RU',
+    'navigator_url' => getenv('NAVIGATOR_URL') ?: 'https://gisp.gov.ru/navigator-measures/ru-RU',   // ДОБАВЛЕНО: чтение из .env
     'items_per_page' => getenv('ITEMS_PER_PAGE') ?: 50,
     'max_retries' => getenv('MAX_RETRIES') ?: 3,
-    'request_delay' => getenv('REQUEST_DELAY') ?: 2,
+    'request_delay' => (int)(getenv('REQUEST_DELAY') ?: 5),   // ДОБАВЛЕНО
+    'test_limit' => (int)(getenv('TEST_LIMIT') ?: 20),        // ДОБАВЛЕНО
     'storage_path' => '/var/www/storage',
     'documents_path' => '/var/www/storage/documents',
     'reports_path' => '/var/www/storage/reports',

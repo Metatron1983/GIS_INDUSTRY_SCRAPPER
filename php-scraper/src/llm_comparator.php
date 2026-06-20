@@ -39,10 +39,12 @@ class LLMComparator {
         
         $result = json_decode($this->client->request($completion), true);
         $text = $result['result']['alternatives'][0]['message']['text'] ?? '';
+        
         preg_match('/\{[\s\S]*\}/', $text, $matches);
         if ($matches) {
             return json_decode($matches[0], true);
         }
+        
         return ['raw' => $text, 'discrepancies' => [], 'summary' => 'Ошибка парсинга ответа'];
     }
 }

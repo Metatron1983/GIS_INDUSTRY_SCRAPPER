@@ -5,7 +5,7 @@ use Facebook\WebDriver\WebDriverExpectedCondition;
 function parseMeasureList($html, $baseUrl) {
     $crawler = new \Symfony\Component\DomCrawler\Crawler($html);
     $items = [];
-    $crawler->filter('a[href*="/nmp/measure/"]')->each(function ($node) use (&$items, $baseUrl) {
+    $crawler->filter('a[href*="/nmp/measure/"]')->each(function ($node) use (&$items) {
         $href = $node->attr('href');
         if ($href && strpos($href, '/nmp/measure/') !== false) {
             preg_match('/\/nmp\/measure\/(\d+)/', $href, $matches);
@@ -33,6 +33,11 @@ function parseMeasureList($html, $baseUrl) {
 function parseMeasureDetailWithSelenium($driver, $measureId, $baseUrl) {
     $baseMeasureUrl = "{$baseUrl}/nmp/measure/{$measureId}";
     
+    $driver->get($baseMeasureUrl);
+    $driver->wait(10)->until(
+        WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.measure-content, .nmp-measure'))
+    );
+    
     $data = [
         'purpose' => '',
         'requirements' => '',
@@ -41,55 +46,38 @@ function parseMeasureDetailWithSelenium($driver, $measureId, $baseUrl) {
         'npa_links' => [],
         'npa_section_exists' => false,
     ];
-
-    // Назначение (основная страница)
+    
+    // Назначение (ДОБАВЛЕН более точный селектор)
     try {
-        $driver->get($baseMeasureUrl);
-        $driver->wait(10)->until(
-            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.measure-content, .nmp-measure'))
-        );
         $purposeEl = $driver->findElement(WebDriverBy::cssSelector('.purpose-block, .measure-purpose, h2:contains("Назначение") + div'));
         $data['purpose'] = $purposeEl->getText();
-    } catch (Exception $e) {
-        // не найдено
-    }
-
-    // Требования
-    $requirementUrl = "{$baseUrl}/nmp/measure/{$measureId}/requirement";
+    } catch (Exception $e) {}
+    
+    // Требования (отдельный URL) - ДОБАВЛЕНО
     try {
-        $driver->get($requirementUrl);
-        $driver->wait(5)->until(
-            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.requirement-content, .tab-content'))
-        );
+        $driver->get("{$baseUrl}/nmp/measure/{$measureId}/requirement");
+        $driver->wait(5)->until(WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.requirement-content, .tab-content')));
         $data['requirements'] = $driver->findElement(WebDriverBy::cssSelector('.requirement-content, .tab-content'))->getText();
     } catch (Exception $e) {}
-
-    // Порядок получения (этапы)
-    $stageUrl = "{$baseUrl}/nmp/measure/{$measureId}/stage";
+    
+    // Порядок получения (отдельный URL) - ДОБАВЛЕНО
     try {
-        $driver->get($stageUrl);
-        $driver->wait(5)->until(
-            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.stage-content, .tab-content'))
-        );
+        $driver->get("{$baseUrl}/nmp/measure/{$measureId}/stage");
+        $driver->wait(5)->until(WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.stage-content, .tab-content')));
         $data['procedure_steps'] = $driver->findElement(WebDriverBy::cssSelector('.stage-content, .tab-content'))->getText();
     } catch (Exception $e) {}
-
-    // Необходимые документы
-    $documentUrl = "{$baseUrl}/nmp/measure/{$measureId}/document";
+    
+    // Необходимые документы (отдельный URL) - ДОБАВЛЕНО
     try {
-        $driver->get($documentUrl);
-        $driver->wait(5)->until(
-            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.document-content, .tab-content'))
-        );
+        $driver->get("{$baseUrl}/nmp/measure/{$measureId}/document");
+        $driver->wait(5)->until(WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.document-content, .tab-content')));
         $data['required_docs'] = $driver->findElement(WebDriverBy::cssSelector('.document-content, .tab-content'))->getText();
     } catch (Exception $e) {}
-
-    // НПА и другие документы (основная страница)
+    
+    // Возврат на основную страницу для НПА
+    $driver->get($baseMeasureUrl);
+    $driver->wait(10)->until(WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.measure-content, .nmp-measure')));
     try {
-        $driver->get($baseMeasureUrl);
-        $driver->wait(10)->until(
-            WebDriverExpectedCondition::presenceOfElementLocated(WebDriverBy::cssSelector('.measure-content, .nmp-measure'))
-        );
         $npaSection = $driver->findElement(WebDriverBy::cssSelector('.npa-section, .documents-section, h2:contains("НПА")'));
         $data['npa_section_exists'] = true;
         $links = $npaSection->findElements(WebDriverBy::cssSelector('a[href]'));
@@ -97,16 +85,13 @@ function parseMeasureDetailWithSelenium($driver, $measureId, $baseUrl) {
             $href = $link->getAttribute('href');
             $text = $link->getText();
             if ($href) {
-                $data['npa_links'][] = [
-                    'url' => $href,
-                    'text' => $text ?: basename($href),
-                ];
+                $data['npa_links'][] = ['url' => $href, 'text' => $text ?: basename($href)];
             }
         }
     } catch (Exception $e) {
         $data['npa_section_exists'] = false;
         $data['npa_links'] = [];
     }
-
+    
     return $data;
 }

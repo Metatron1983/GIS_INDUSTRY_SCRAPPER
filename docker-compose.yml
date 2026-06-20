@@ -23,7 +23,7 @@ services:
     container_name: gisp_php
     restart: unless-stopped
     volumes:
-      - ./php-scraper/src:/var/www/html/src
+      - ./php-scraper/src:/var/www/html/src   # ИЗМЕНЕНО: теперь монтируем в подпапку src, чтобы не затирать vendor
       - ./php-scraper/storage:/var/www/storage
     environment:
       - DB_HOST=mysql
@@ -33,6 +33,10 @@ services:
       - YANDEX_API_KEY=${YANDEX_API_KEY}
       - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
       - YANDEX_MODEL=${YANDEX_MODEL}
+      - NAVIGATOR_URL=${NAVIGATOR_URL}        # ДОБАВЛЕНО: для фильтра региональных мер
+      - REQUEST_DELAY=${REQUEST_DELAY}        # ДОБАВЛЕНО: задержка между запросами
+      - TEST_LIMIT=${TEST_LIMIT}              # ДОБАВЛЕНО: лимит тестовых мер
+      - BASE_URL=${BASE_URL}                  # ДОБАВЛЕНО: базовый URL сайта
     depends_on:
       - mysql
       - selenium

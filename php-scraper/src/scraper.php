@@ -6,14 +6,28 @@ require_once 'downloader.php';
 require_once 'selenium_helper.php';
 
 $config = require 'config.php';
-$client = new GuzzleHttp\Client(['timeout' => 30, 'headers' => ['User-Agent' => 'Mozilla/5.0']]);
+$testLimit = $config['test_limit'];   // ДОБАВЛЕНО
+
+// Ротация User-Agent (ДОБАВЛЕНО)
+$userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+];
+
+$userAgent = $userAgents[array_rand($userAgents)];   // ДОБАВЛЕНО
+$client = new GuzzleHttp\Client([
+    'timeout' => 30,
+    'headers' => ['User-Agent' => $userAgent],
+]);
+
 $db = new PDO("mysql:host={$config['db']['host']};dbname={$config['db']['name']};charset=utf8mb4", $config['db']['user'], $config['db']['pass']);
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
 function logMsg($msg) { echo '[' . date('Y-m-d H:i:s') . '] ' . $msg . PHP_EOL; }
 
 function getMeasureList($client, $config, $page) {
-    $url = $config['navigator_url'] . "?page={$page}&per-page={$config['items_per_page']}";
+    $url = $config['navigator_url'] . "&page={$page}&per-page={$config['items_per_page']}";   // ИЗМЕНЕНО: используем NAVIGATOR_URL
     logMsg("Загрузка страницы {$page}");
     $html = fetchHtml($url, false);
     if (!$html || !strpos($html, 'measure-item')) {
@@ -63,16 +77,23 @@ while (true) {
             'procedure_steps' => $detail['procedure_steps'] ?? '',
             'npa_section_exists' => $detail['npa_section_exists'] ? 1 : 0,
         ];
+        
         saveMeasure($db, $data);
         
         if (!$detail['npa_section_exists']) {
             $stmt = $db->prepare("INSERT INTO measure_errors (measure_id, error_type, error_text) VALUES (?, 'no_npa_section', ?)");
             $stmt->execute([$item['id'], 'Раздел "НПА и другие документы" отсутствует на странице']);
         }
+        
         if (!empty($detail['npa_links'])) {
             downloadDocuments($client, $config, $item['id'], $detail['npa_links']);
         }
+        
         $total++;
+        if ($testLimit > 0 && $total >= $testLimit) {   // ДОБАВЛЕНО: остановка по лимиту
+            logMsg("Достигнут лимит {$testLimit} мер, остановка.");
+            break 2;
+        }
         sleep($config['request_delay']);
     }
     $page++;
